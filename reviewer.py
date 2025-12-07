@@ -205,65 +205,60 @@ class AICodeReviewer:
                         )
                     )
 
-    def _check_variables(self) -> None:
-        """
-        Check for undefined and unused variables.
+  def _check_variables(self) -> None:
+    """Check for undefined and unused variables (simple static analysis)."""
 
-        (Simple heuristic: not a full static analyzer.)
-        """
-        if self.ast_tree is None:
-            return
+    if self.ast_tree is None:
+        return
 
-        defined_vars: Set[str] = set()
-        used_vars: Set[str] = set()
-        builtins = set(dir(__builtins__))
+    defined_vars: Set[str] = set()
+    used_vars: Set[str] = set()
 
-        # Track first usage line number for better messages
-        usage_lines: Dict[str, int] = {}
+    # Proper builtins set
+    builtins_set = set(dir(__builtins__))
 
-        def _add_defined(name: str, lineno: int) -> None:
-            if not name:
-                return
-            defined_vars.add(name)
+    usage_lines: Dict[str, int] = {}
 
-        for node in ast.walk(self.ast_tree):
-            # Imports
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    name = alias.asname or alias.name.split('.')[0]
-                    _add_defined(name, getattr(node, "lineno", 0))
+    for node in ast.walk(self.ast_tree):
 
-            if isinstance(node, ast.ImportFrom):
-                for alias in node.names:
-                    name = alias.asname or alias.name
-                    _add_defined(name, getattr(node, "lineno", 0))
+        # --- Defined variables ---
+        # Assignment targets
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            defined_vars.add(node.id)
 
-            # Function arguments
-            if isinstance(node, ast.arg):
-                _add_defined(node.arg, getattr(node, "lineno", 0))
+        # Function arguments
+        if isinstance(node, ast.arg):
+            defined_vars.add(node.arg)
 
-            # Assignments / Targets
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-                _add_defined(node.id, getattr(node, "lineno", 0))
+        # Imports
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.asname or alias.name.split(".")[0]
+                defined_vars.add(name)
 
-            # Usages
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
-                if node.id not in builtins:
-                    used_vars.add(node.id)
-                    usage_lines.setdefault(node.id, getattr(node, "lineno", 0))
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                name = alias.asname or alias.name
+                defined_vars.add(name)
 
-        # Check for undefined variables: used but never defined
-        undefined = used_vars - defined_vars
-        for var in undefined:
-            line = usage_lines.get(var, 0)
-            self.issues.append(
-                CodeIssue(
-                    line,
-                    'undefined_variable',
-                    f"Variable '{var}' is used but not defined",
-                    self.severity_levels['undefined_variable'],
-                )
+        # --- Used variables ---
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            used_vars.add(node.id)
+            usage_lines.setdefault(node.id, getattr(node, "lineno", 0))
+
+    # Filter out builtins
+    undefined_vars = {v for v in used_vars - defined_vars if v not in builtins_set}
+
+    for var in undefined_vars:
+        self.issues.append(
+            CodeIssue(
+                usage_lines.get(var, 0),
+                "undefined_variable",
+                f"Variable '{var}' is used but not defined",
+                "HIGH"
             )
+        )
+
 
     def _check_comments(self) -> None:
         """Analyze code comments for quality and formatting."""
