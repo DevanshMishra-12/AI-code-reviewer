@@ -52,6 +52,9 @@ class AICodeReviewer:
             'file_error': 'HIGH',
         }
 
+    # -------------------------------------------------------------------------
+    # Loading code
+    # -------------------------------------------------------------------------
     def load_file(self, file_path: str) -> bool:
         """
         Load Python code from a file.
@@ -86,6 +89,9 @@ class AICodeReviewer:
         """
         self.source_code = code
 
+    # -------------------------------------------------------------------------
+    # Main analysis pipeline
+    # -------------------------------------------------------------------------
     def analyze(self) -> None:
         """
         Perform comprehensive code analysis by running all available checks.
@@ -115,6 +121,9 @@ class AICodeReviewer:
         self._check_comments()
         self._check_best_practices()
 
+    # -------------------------------------------------------------------------
+    # Individual checks
+    # -------------------------------------------------------------------------
     def _check_syntax(self) -> None:
         """Check for basic structural issues (like empty blocks)."""
         if self.ast_tree is None:
@@ -188,39 +197,38 @@ class AICodeReviewer:
                         )
 
     def _check_complexity(self) -> None:
-        """Check for code complexity issues based on statement count."""
+        """Check for code complexity issues based on AST node count."""
         if self.ast_tree is None:
             return
 
         for node in ast.walk(self.ast_tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                num_statements = len(list(ast.walk(node)))
-                if num_statements > 50:
+                num_nodes = len(list(ast.walk(node)))
+                if num_nodes > 50:
                     self.issues.append(
                         CodeIssue(
                             node.lineno,
                             'complexity_issue',
-                            f"Function '{node.name}' is too complex ({num_statements} AST nodes)",
+                            f"Function '{node.name}' is too complex ({num_nodes} AST nodes)",
                             self.severity_levels['complexity_issue'],
                         )
                     )
 
     def _check_variables(self) -> None:
-        """Check for undefined variables."""
-
+        """Check for undefined variables (simple static analysis)."""
         if self.ast_tree is None:
             return
 
         defined_vars: Set[str] = set()
         used_vars: Set[str] = set()
 
-        # Python built-in names
+        # Python built-in names (print, range, len, etc.)
         builtins_set = set(dir(__builtins__))
 
         usage_lines: Dict[str, int] = {}
 
         for node in ast.walk(self.ast_tree):
-
+            # ----------------- Defined variables -----------------
             # Assignment targets
             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
                 defined_vars.add(node.id)
@@ -238,12 +246,12 @@ class AICodeReviewer:
                 for alias in node.names:
                     defined_vars.add(alias.asname or alias.name)
 
-            # Used variables
+            # ----------------- Used variables -----------------
             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
                 used_vars.add(node.id)
                 usage_lines.setdefault(node.id, getattr(node, "lineno", 0))
 
-        # Remove built-ins from undefined list
+        # Variables that are used but not defined and not built-ins
         undefined_vars = {
             v for v in used_vars - defined_vars if v not in builtins_set
         }
@@ -254,7 +262,7 @@ class AICodeReviewer:
                     usage_lines.get(var, 0),
                     "undefined_variable",
                     f"Variable '{var}' is used but not defined",
-                    "HIGH"
+                    self.severity_levels["undefined_variable"],
                 )
             )
 
@@ -321,6 +329,9 @@ class AICodeReviewer:
                     )
                 )
 
+    # -------------------------------------------------------------------------
+    # Report
+    # -------------------------------------------------------------------------
     def get_report(self) -> str:
         """
         Generate a detailed report of all issues found during analysis.
