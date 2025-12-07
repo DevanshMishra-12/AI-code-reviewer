@@ -4,15 +4,19 @@ AI Code Reviewer - A Python script for automated code analysis and improvement s
 
 This script analyzes Python code for common issues, style violations, and potential
 improvements, providing detailed feedback to help developers write better code.
+
+Usage:
+    python reviewer.py path/to/file.py
+    # or just run without args to see the built-in example analysis.
 """
 
 import ast
 import sys
 import pycodestyle
-from typing import List, Set, Dict, Optional, Any
+from typing import List, Set, Dict, Optional
 from dataclasses import dataclass
-import re
 from pathlib import Path
+
 
 @dataclass
 class CodeIssue:
@@ -21,6 +25,7 @@ class CodeIssue:
     issue_type: str
     message: str
     severity: str  # 'HIGH', 'MEDIUM', 'LOW'
+
 
 class AICodeReviewer:
     """
@@ -33,15 +38,18 @@ class AICodeReviewer:
         self.issues: List[CodeIssue] = []
         self.source_code: str = ""
         self.ast_tree: Optional[ast.AST] = None
-        
+
         # Configure severity levels for different types of issues
         self.severity_levels: Dict[str, str] = {
             'syntax_error': 'HIGH',
             'undefined_variable': 'HIGH',
             'style_violation': 'MEDIUM',
             'missing_docstring': 'MEDIUM',
+            'docstring_quality': 'LOW',
             'comment_issue': 'LOW',
-            'complexity_issue': 'MEDIUM'
+            'complexity_issue': 'MEDIUM',
+            'best_practice': 'LOW',
+            'file_error': 'HIGH',
         }
 
     def load_file(self, file_path: str) -> bool:
@@ -59,12 +67,14 @@ class AICodeReviewer:
                 self.source_code = file.read()
             return True
         except Exception as e:
-            self.issues.append(CodeIssue(
-                0,
-                'file_error',
-                f"Error loading file: {str(e)}",
-                'HIGH'
-            ))
+            self.issues.append(
+                CodeIssue(
+                    0,
+                    'file_error',
+                    f"Error loading file '{file_path}': {str(e)}",
+                    self.severity_levels['file_error'],
+                )
+            )
             return False
 
     def load_code(self, code: str) -> None:
@@ -81,17 +91,19 @@ class AICodeReviewer:
         Perform comprehensive code analysis by running all available checks.
         """
         self.issues = []  # Reset issues list before new analysis
-        
+
         # Parse AST
         try:
             self.ast_tree = ast.parse(self.source_code)
         except SyntaxError as e:
-            self.issues.append(CodeIssue(
-                e.lineno or 0,
-                'syntax_error',
-                f"Syntax Error: {str(e)}",
-                'HIGH'
-            ))
+            self.issues.append(
+                CodeIssue(
+                    e.lineno or 0,
+                    'syntax_error',
+                    f"Syntax Error: {str(e)}",
+                    self.severity_levels['syntax_error'],
+                )
+            )
             return
 
         # Run all analysis checks
@@ -104,146 +116,217 @@ class AICodeReviewer:
         self._check_best_practices()
 
     def _check_syntax(self) -> None:
-        """Check for syntax errors and basic structural issues."""
+        """Check for basic structural issues (like empty blocks)."""
+        if self.ast_tree is None:
+            return
+
         for node in ast.walk(self.ast_tree):
             # Check for empty code blocks
-            if isinstance(node, (ast.For, ast.While, ast.If, ast.With)):
+            if isinstance(node, (ast.For, ast.While, ast.If, ast.With, ast.AsyncWith, ast.AsyncFor)):
                 if not node.body:
-                    self.issues.append(CodeIssue(
-                        getattr(node, 'lineno', 0),
-                        'syntax_error',
-                        f"Empty {node.__class__.__name__} block found",
-                        'HIGH'
-                    ))
+                    self.issues.append(
+                        CodeIssue(
+                            getattr(node, 'lineno', 0),
+                            'syntax_error',
+                            f"Empty {node.__class__.__name__} block found",
+                            self.severity_levels['syntax_error'],
+                        )
+                    )
 
     def _check_style(self) -> None:
         """Check code style using pycodestyle."""
         style_guide = pycodestyle.StyleGuide(quiet=True)
-        
-        # Create a temporary file for pycodestyle to analyze
+
         temp_file = Path('temp_code_review.py')
         try:
-            temp_file.write_text(self.source_code)
-            result = style_guide.check_files([temp_file])
-            
-            for line_number, offset, code, text, doc in result._deferred_print:
-                self.issues.append(CodeIssue(
-                    line_number,
-                    'style_violation',
-                    f"{code}: {text}",
-                    'MEDIUM'
-                ))
+            temp_file.write_text(self.source_code, encoding='utf-8')
+            report = style_guide.check_files([temp_file])
+
+            # pycodestyle stores errors in _deferred_print (semi-private API).
+            deferred = getattr(report, "_deferred_print", [])
+            for line_number, offset, code, text, doc in deferred:
+                self.issues.append(
+                    CodeIssue(
+                        line_number,
+                        'style_violation',
+                        f"{code}: {text}",
+                        self.severity_levels['style_violation'],
+                    )
+                )
         finally:
             if temp_file.exists():
                 temp_file.unlink()
 
     def _check_docstrings(self) -> None:
         """Check for missing or inadequate docstrings."""
+        if self.ast_tree is None:
+            return
+
         for node in ast.walk(self.ast_tree):
-            if isinstance(node, (ast.FunctionDef, ast.ClassDef, ast.Module)):
-                has_docstring = False
-                if node.body and isinstance(node.body[0], ast.Expr):
-                    if isinstance(node.body[0].value, ast.Str):
-                        has_docstring = True
-                        # Check docstring quality
-                        docstring = node.body[0].value.s
-                        if len(docstring.strip()) < 10:
-                            self.issues.append(CodeIssue(
-                                node.lineno,
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)):
+                lineno = getattr(node, "lineno", 0)
+                docstring = ast.get_docstring(node)
+
+                if not docstring:
+                    self.issues.append(
+                        CodeIssue(
+                            lineno,
+                            'missing_docstring',
+                            f"Missing docstring in {node.__class__.__name__}",
+                            self.severity_levels['missing_docstring'],
+                        )
+                    )
+                else:
+                    if len(docstring.strip()) < 10:
+                        self.issues.append(
+                            CodeIssue(
+                                lineno,
                                 'docstring_quality',
                                 f"Short or uninformative docstring in {node.__class__.__name__}",
-                                'LOW'
-                            ))
-                
-                if not has_docstring:
-                    self.issues.append(CodeIssue(
-                        node.lineno,
-                        'missing_docstring',
-                        f"Missing docstring in {node.__class__.__name__}",
-                        'MEDIUM'
-                    ))
+                                self.severity_levels['docstring_quality'],
+                            )
+                        )
 
     def _check_complexity(self) -> None:
-        """Check for code complexity issues."""
+        """Check for code complexity issues based on statement count."""
+        if self.ast_tree is None:
+            return
+
         for node in ast.walk(self.ast_tree):
-            # Check function complexity
-            if isinstance(node, ast.FunctionDef):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 num_statements = len(list(ast.walk(node)))
                 if num_statements > 50:
-                    self.issues.append(CodeIssue(
-                        node.lineno,
-                        'complexity_issue',
-                        f"Function '{node.name}' is too complex ({num_statements} statements)",
-                        'MEDIUM'
-                    ))
+                    self.issues.append(
+                        CodeIssue(
+                            node.lineno,
+                            'complexity_issue',
+                            f"Function '{node.name}' is too complex ({num_statements} AST nodes)",
+                            self.severity_levels['complexity_issue'],
+                        )
+                    )
 
     def _check_variables(self) -> None:
-        """Check for undefined and unused variables."""
+        """
+        Check for undefined and unused variables.
+
+        (Simple heuristic: not a full static analyzer.)
+        """
+        if self.ast_tree is None:
+            return
+
         defined_vars: Set[str] = set()
         used_vars: Set[str] = set()
         builtins = set(dir(__builtins__))
 
-        for node in ast.walk(self.ast_tree):
-            if isinstance(node, ast.Name):
-                if isinstance(node.ctx, ast.Store):
-                    defined_vars.add(node.id)
-                elif isinstance(node.ctx, ast.Load):
-                    if node.id not in builtins:
-                        used_vars.add(node.id)
+        # Track first usage line number for better messages
+        usage_lines: Dict[str, int] = {}
 
-        # Check for undefined variables
+        def _add_defined(name: str, lineno: int) -> None:
+            if not name:
+                return
+            defined_vars.add(name)
+
+        for node in ast.walk(self.ast_tree):
+            # Imports
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    name = alias.asname or alias.name.split('.')[0]
+                    _add_defined(name, getattr(node, "lineno", 0))
+
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    name = alias.asname or alias.name
+                    _add_defined(name, getattr(node, "lineno", 0))
+
+            # Function arguments
+            if isinstance(node, ast.arg):
+                _add_defined(node.arg, getattr(node, "lineno", 0))
+
+            # Assignments / Targets
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                _add_defined(node.id, getattr(node, "lineno", 0))
+
+            # Usages
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                if node.id not in builtins:
+                    used_vars.add(node.id)
+                    usage_lines.setdefault(node.id, getattr(node, "lineno", 0))
+
+        # Check for undefined variables: used but never defined
         undefined = used_vars - defined_vars
         for var in undefined:
-            self.issues.append(CodeIssue(
-                0,  # We don't have line numbers for this check
-                'undefined_variable',
-                f"Variable '{var}' is used but not defined",
-                'HIGH'
-            ))
+            line = usage_lines.get(var, 0)
+            self.issues.append(
+                CodeIssue(
+                    line,
+                    'undefined_variable',
+                    f"Variable '{var}' is used but not defined",
+                    self.severity_levels['undefined_variable'],
+                )
+            )
 
     def _check_comments(self) -> None:
         """Analyze code comments for quality and formatting."""
-        lines = self.source_code.split('\n')
+        lines = self.source_code.splitlines()
         for i, line in enumerate(lines, 1):
             stripped = line.strip()
             if stripped.startswith('#'):
                 # Check for empty comments
                 if len(stripped) == 1:
-                    self.issues.append(CodeIssue(
-                        i,
-                        'comment_issue',
-                        "Empty comment found",
-                        'LOW'
-                    ))
-                # Check for space after #
-                elif stripped[1] != ' ':
-                    self.issues.append(CodeIssue(
-                        i,
-                        'comment_issue',
-                        "Comments should have a space after '#'",
-                        'LOW'
-                    ))
+                    self.issues.append(
+                        CodeIssue(
+                            i,
+                            'comment_issue',
+                            "Empty comment found",
+                            self.severity_levels['comment_issue'],
+                        )
+                    )
+                # Check for space after '#'
+                elif len(stripped) > 1 and stripped[1] != ' ':
+                    self.issues.append(
+                        CodeIssue(
+                            i,
+                            'comment_issue',
+                            "Comments should have a space after '#'",
+                            self.severity_levels['comment_issue'],
+                        )
+                    )
                 # Check for TODO comments
                 elif 'TODO' in stripped.upper():
-                    self.issues.append(CodeIssue(
-                        i,
-                        'comment_issue',
-                        "TODO comment found - Consider addressing it",
-                        'LOW'
-                    ))
+                    self.issues.append(
+                        CodeIssue(
+                            i,
+                            'comment_issue',
+                            "TODO comment found - Consider addressing it",
+                            self.severity_levels['comment_issue'],
+                        )
+                    )
 
     def _check_best_practices(self) -> None:
-        """Check for violations of Python best practices."""
+        """Check for violations of simple Python best practices."""
+        if self.ast_tree is None:
+            return
+
         for node in ast.walk(self.ast_tree):
-            # Check for excessive line length in strings
-            if isinstance(node, ast.Str):
-                if len(node.s) > 79:
-                    self.issues.append(CodeIssue(
+            # Check for excessive line length in string literals
+            text = None
+
+            # Python 3.8+: string literals are ast.Constant
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                text = node.value
+            # Older Python: ast.Str
+            elif isinstance(node, ast.Str):
+                text = node.s
+
+            if text is not None and len(text) > 79:
+                self.issues.append(
+                    CodeIssue(
                         getattr(node, 'lineno', 0),
                         'best_practice',
                         "String literal is too long (> 79 characters)",
-                        'LOW'
-                    ))
+                        self.severity_levels['best_practice'],
+                    )
+                )
 
     def get_report(self) -> str:
         """
@@ -256,22 +339,20 @@ class AICodeReviewer:
             return "No issues found. Code looks good! 🎉"
 
         # Sort issues by severity and line number
+        severity_order = {'HIGH': 0, 'MEDIUM': 1, 'LOW': 2}
         sorted_issues = sorted(
             self.issues,
-            key=lambda x: (
-                {'HIGH': 0, 'MEDIUM': 1, 'LOW': 2}[x.severity],
-                x.line_number
-            )
+            key=lambda x: (severity_order.get(x.severity, 3), x.line_number)
         )
 
         report = ["Code Review Report", "=================\n"]
-        
+
         # Group issues by severity
         for severity in ['HIGH', 'MEDIUM', 'LOW']:
             severity_issues = [i for i in sorted_issues if i.severity == severity]
             if severity_issues:
                 report.append(f"{severity} Priority Issues:")
-                report.append("-" * 20)
+                report.append("-" * 30)
                 for issue in severity_issues:
                     location = f"Line {issue.line_number}: " if issue.line_number else ""
                     report.append(f"{location}{issue.message}")
@@ -279,9 +360,9 @@ class AICodeReviewer:
 
         return "\n".join(report)
 
-def main():
+
+def main() -> None:
     """Main function to demonstrate the AI Code Reviewer usage."""
-    # Example Python code to analyze
     example_code = """
 def calculate_sum(numbers):
     #bad comment
@@ -303,11 +384,20 @@ class ExampleClass:
         return result
 """
 
-    # Initialize and run the code reviewer
     reviewer = AICodeReviewer()
-    reviewer.load_code(example_code)
+
+    if len(sys.argv) > 1:
+        file_path = sys.argv[1]
+        if not reviewer.load_file(file_path):
+            # If loading failed, just print the issues we have (file_error)
+            print(reviewer.get_report())
+            return
+    else:
+        reviewer.load_code(example_code)
+
     reviewer.analyze()
     print(reviewer.get_report())
+
 
 if __name__ == "__main__":
     main()
