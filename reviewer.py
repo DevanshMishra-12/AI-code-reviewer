@@ -206,7 +206,7 @@ class AICodeReviewer:
                     )
 
     def _check_variables(self) -> None:
-        """Check for undefined and unused variables (simple static analysis)."""
+        """Check for undefined variables."""
 
         if self.ast_tree is None:
             return
@@ -214,14 +214,13 @@ class AICodeReviewer:
         defined_vars: Set[str] = set()
         used_vars: Set[str] = set()
 
-        # Proper builtins set
+        # Python built-in names
         builtins_set = set(dir(__builtins__))
 
         usage_lines: Dict[str, int] = {}
 
         for node in ast.walk(self.ast_tree):
 
-            # --- Defined variables ---
             # Assignment targets
             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
                 defined_vars.add(node.id)
@@ -233,20 +232,18 @@ class AICodeReviewer:
             # Imports
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    name = alias.asname or alias.name.split(".")[0]
-                    defined_vars.add(name)
+                    defined_vars.add(alias.asname or alias.name.split(".")[0])
 
             if isinstance(node, ast.ImportFrom):
                 for alias in node.names:
-                    name = alias.asname or alias.name
-                    defined_vars.add(name)
+                    defined_vars.add(alias.asname or alias.name)
 
-            # --- Used variables ---
+            # Used variables
             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
                 used_vars.add(node.id)
                 usage_lines.setdefault(node.id, getattr(node, "lineno", 0))
 
-        # Filter out builtins
+        # Remove built-ins from undefined list
         undefined_vars = {
             v for v in used_vars - defined_vars if v not in builtins_set
         }
@@ -257,7 +254,7 @@ class AICodeReviewer:
                     usage_lines.get(var, 0),
                     "undefined_variable",
                     f"Variable '{var}' is used but not defined",
-                    self.severity_levels["undefined_variable"],
+                    "HIGH"
                 )
             )
 
